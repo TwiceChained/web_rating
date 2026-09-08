@@ -1,0 +1,15 @@
+# Local workbooks and results must not be published.
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.zip
+*.exe
+*.log
+result*.txt
+missing_people.txt
+preview*.png
+__pycache__/
+.env
+.env.*
