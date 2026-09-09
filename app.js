@@ -52,7 +52,6 @@ const dom = {
   missingText: document.getElementById("missingText"),
   ratingBody: document.getElementById("ratingBody"),
   downloadExcel: document.getElementById("downloadExcel"),
-  downloadScores: document.getElementById("downloadScores"),
   toast: document.getElementById("toast")
 };
 
@@ -378,7 +377,7 @@ function invalidateResults() {
 function setBusy(busy) {
   state.busy = busy;
   [dom.qualityFile, dom.ratingFile, dom.reviewsFile, dom.sheetSelect, dom.reviewPeriod,
-    dom.removeReviews, dom.downloadExcel, dom.downloadScores].forEach(input => { input.disabled = busy; });
+    dom.removeReviews, dom.downloadExcel].forEach(input => { input.disabled = busy; });
   dom.reviewMappingList.querySelectorAll("select").forEach(input => { input.disabled = busy; });
   dom.calculateButton.classList.toggle("loading", busy);
   updateReadyState();
@@ -581,15 +580,6 @@ async function downloadFinalExcel() {
   }
 }
 
-function downloadScoresTxt() {
-  if (!state.originalResults.length || state.busy) return;
-  const text = state.originalResults
-    .map(item => item.qualityScore === null ? "" : String(item.qualityScore).replace(".", ","))
-    .join("\r\n");
-  saveBlob(new Blob([`\uFEFF${text}\r\n`], { type: "text/plain;charset=utf-8" }), "result_only_scores.txt");
-  showToast("TXT завантажено ✓");
-}
-
 dom.qualityFile.addEventListener("change", event => {
   invalidateResults();
   resetReviewMapping();
@@ -731,5 +721,4 @@ dom.calculateButton.addEventListener("click", async () => {
 });
 
 dom.downloadExcel.addEventListener("click", downloadFinalExcel);
-dom.downloadScores.addEventListener("click", downloadScoresTxt);
 updateReadyState();

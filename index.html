@@ -115,7 +115,6 @@
             <h2>Фінальний рейтинг</h2>
           </div>
           <div class="actions">
-            <button class="secondary-button" id="downloadScores" type="button">TXT для вставки</button>
             <button class="download-button" id="downloadExcel" type="button">Завантажити Excel</button>
           </div>
         </div>
@@ -139,8 +138,6 @@
           <summary>Зміни переглядів і записи, що потребують уваги</summary>
           <pre id="reviewAudit"></pre>
         </details>
-        <p class="input-hint">Усі колонки вихідної таблиці збережено. КК — оцінка КЯ зі статистики. На вузькому екрані гортайте таблицю вправо; ПІБ і заголовки закріплено.</p>
-        <p class="input-hint">Фінал = КК в рейтингу + РЗ в рейтингу + рейтингу. РЗ і РЗ в рейтингу = 0: цей показник береться з іншого джерела. Внески КК та ефективності залишаються по 40%, без перерозподілу ваги РЗ.</p>
 
         <div class="table-wrap" tabindex="0" role="region" aria-label="Повна таблиця рейтингу, горизонтальна прокрутка">
           <table id="ratingTable">
@@ -159,6 +156,6 @@
 
   <script src="exceljs-4.4.0.min.js"></script>
   <script src="rating-core.js?v=20260909-gray"></script>
-  <script src="app.js?v=20260909-gray"></script>
+  <script src="app.js?v=20260909-excel-only"></script>
 </body>
 </html>
