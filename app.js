@@ -47,6 +47,7 @@ const dom = {
   foundCount: document.getElementById("foundCount"),
   missingCount: document.getElementById("missingCount"),
   sheetSummary: document.getElementById("sheetSummary"),
+  participationSummary: document.getElementById("participationSummary"),
   missingBox: document.getElementById("missingBox"),
   missingText: document.getElementById("missingText"),
   ratingBody: document.getElementById("ratingBody"),
@@ -244,7 +245,8 @@ function readRating(workbook, sheetName, scores) {
     }
     state.report = RatingCore.applyReviews(results, state.reviewsData, dom.reviewPeriod.value, state.reviewOverrides);
   }
-  const base = RatingCore.normalization(worksheet, layout);
+  const base = results.some(item => !item.excludedFromRating)
+    ? RatingCore.normalization(worksheet, layout) : { label: "Усі працівники не рейтингуються" };
   state.maximum = RatingCore.recalculate(results, base);
   state.baseLabel = base.label;
   state.columns = [...layout.columns,
@@ -255,14 +257,16 @@ function readRating(workbook, sheetName, scores) {
 }
 
 function rankResults(results) {
+  const participates = item => !item.excludedFromRating && item.finalScore !== null;
   const ranked = results.map(item => ({ ...item }))
-    .sort((a, b) => (b.finalScore ?? -Infinity) - (a.finalScore ?? -Infinity) || a.fio.localeCompare(b.fio, "uk"));
-  const eligible = ranked.filter(item => item.finalScore !== null).length;
+    .sort((a, b) => Number(participates(b)) - Number(participates(a))
+      || (b.finalScore ?? -Infinity) - (a.finalScore ?? -Infinity) || a.fio.localeCompare(b.fio, "uk"));
+  const eligible = ranked.filter(participates).length;
   let previous = null;
   let place = 0;
 
   ranked.forEach((item, index) => {
-    if (item.finalScore === null) {
+    if (!participates(item)) {
       item.place = null;
       item.zone = { css: "zone-unrated", color: "FFD9D9D9" };
       return;
@@ -288,6 +292,9 @@ function renderResults(sheetName) {
   dom.foundCount.textContent = found;
   dom.missingCount.textContent = state.missing.length;
   dom.sheetSummary.textContent = sheetName;
+  const excluded = state.originalResults.filter(item => item.excludedFromRating).length;
+  const ranked = state.rankedResults.filter(item => item.place !== null).length;
+  dom.participationSummary.textContent = `У рейтингу: ${ranked}. Не рейтингуються за сірим позначенням у файлі: ${excluded}. Сірі рядки завжди внизу й не входять до часток кольорових зон. Бали для них показано довідково.`;
   dom.ratingBody.replaceChildren();
   dom.ratingHead.replaceChildren();
   for (const column of state.columns) {
@@ -519,10 +526,15 @@ async function downloadFinalExcel() {
       const row = legend.addRow([zone.name, zone.label]);
       row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: zone.color } };
     });
+    const grayLegend = legend.addRow(["Сіра — поза рейтингом", "Сіре позначення у джерелі або неможливий розрахунок; без місця, внизу таблиці"]);
+    grayLegend.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
     legend.addRow([]);
     legend.addRow(["Джерело", state.sourceSheet]);
     legend.addRow(["Перегляди", state.report ? state.report.period : "Збережено з рейтингу"]);
-    legend.addRow(["База ефективності", `${state.baseLabel} вихідного листа; максимум ${state.maximum}`]);
+    legend.addRow(["База ефективності", `${state.baseLabel}; максимум ${state.maximum ?? "—"}. Сірі рядки виключено з групи MAX`]);
+    legend.addRow(["У рейтингу", state.rankedResults.filter(item => item.place !== null).length]);
+    legend.addRow(["Не рейтингуються за джерелом", state.originalResults.filter(item => item.excludedFromRating).length]);
+    legend.addRow(["Сіре позначення", "Береться з вихідного фінального листа, включно з підтримуваними правилами умовного форматування. Бали довідкові; місця та зони лише для учасників"]);
     legend.addRow(["Формула фіналу", "КК в рейтингу + РЗ в рейтингу + рейтингу (M + K + I)"]);
     legend.addRow(["РЗ", "РЗ = 0; РЗ в рейтингу = 0. Дані з іншого джерела не імпортуються"]);
     legend.addRow(["Внески", "КК × 0,4 + 0 + ефективність × 0,4. Вага РЗ не перерозподіляється"]);

@@ -80,13 +80,149 @@ window.RatingCore = (() => {
     return period;
   }
 
+  const themeColors = new WeakMap();
+  function isGrayFill(fill, workbook) {
+    if (fill?.type !== "pattern" || fill.pattern !== "solid") return false;
+    const color = fill.fgColor || fill.bgColor;
+    if (!color) return false;
+    let rgb = color.argb?.slice(-6);
+    if (!rgb && color.indexed !== undefined) {
+      // Grayscale entries of Excel's standard indexed palette. System colors
+      // and unfilled/white cells are not exclusion markers.
+      rgb = { 0: "000000", 1: "FFFFFF", 8: "000000", 9: "FFFFFF",
+        22: "C0C0C0", 23: "808080", 55: "969696", 63: "333333" }[color.indexed];
+    }
+    if (!rgb && color.theme !== undefined) {
+      if (!themeColors.has(workbook)) {
+        const colors = ["FFFFFF", "000000", "EEECE1", "1F497D"];
+        // ExcelJS 4.4 preserves the original theme XML on the workbook.
+        const xml = workbook._themes?.theme1;
+        if (xml) {
+          const doc = new DOMParser().parseFromString(xml, "application/xml");
+          const scheme = doc.getElementsByTagNameNS("*", "clrScheme")[0];
+          ["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4",
+            "accent5", "accent6", "hlink", "folHlink"].forEach((name, index) => {
+            const node = scheme?.getElementsByTagNameNS("*", name)[0]?.firstElementChild;
+            if (node) colors[index] = node.getAttribute("lastClr") || node.getAttribute("val");
+          });
+        }
+        themeColors.set(workbook, colors);
+      }
+      rgb = themeColors.get(workbook)[color.theme];
+    }
+    if (!/^[0-9a-f]{6}$/i.test(rgb || "")) return false;
+    const tint = Number(color.tint) || 0;
+    const channels = rgb.match(/../g).map(hex => {
+      const channel = parseInt(hex, 16);
+      return Math.round(tint < 0 ? channel * (1 + tint) : channel + (255 - channel) * tint);
+    });
+    const darkest = Math.min(...channels), lightest = Math.max(...channels);
+    // Includes B7B7B7, CCCCCC and D9D9D9 used in the source books;
+    // excludes black, white and near-white alternating table backgrounds.
+    return darkest >= 48 && lightest <= 230 && lightest - darkest <= 8;
+  }
+
+  function columnNumber(letters) {
+    return [...letters.toUpperCase()].reduce((result, letter) => result * 26 + letter.charCodeAt(0) - 64, 0);
+  }
+
+  function formattingRange(ref) {
+    const match = ref.match(/^\$?([A-Z]+)(?:\$?(\d+))?(?::\$?([A-Z]+)(?:\$?(\d+))?)?$/i);
+    if (!match) return null;
+    return { left: columnNumber(match[1]), top: Number(match[2] || 1),
+      right: columnNumber(match[3] || match[1]), bottom: Number(match[4] || match[2] || 1048576) };
+  }
+
+  function formattingOperand(text, ws, row, column, anchor) {
+    const token = text.trim();
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(token)) return Number(token);
+    if (/^"(?:[^"]|"")*"$/.test(token)) return token.slice(1, -1).replace(/""/g, '"');
+    if (/^(TRUE|FALSE)(\(\))?$/i.test(token)) return /^TRUE/i.test(token);
+    // Google Sheets exports row-color rules as $O:$O=57. They refer to
+    // the current row's cached O value, before the calculator sorts anything.
+    const whole = token.match(/^(\$?)([A-Z]+):\$?\2$/i);
+    const cell = token.match(/^(\$?)([A-Z]+)(\$?)(\d+)$/i);
+    if (!whole && !cell) return undefined;
+    const ref = whole || cell;
+    const c = columnNumber(ref[2]) + (ref[1] ? 0 : column - anchor.left);
+    const r = whole ? row : Number(cell[4]) + (cell[3] ? 0 : row - anchor.top);
+    if (c < 1 || c > 16384 || r < 1 || r > 1048576) return undefined;
+    const source = ws.getCell(r, c);
+    const cached = value(source);
+    if (source.type === ExcelJS.ValueType.Formula && cached === null) return undefined;
+    return cached ?? "";
+  }
+
+  function formattingComparison(left, operator, right) {
+    if (left === undefined || right === undefined) return null;
+    const a = number(left), b = number(right);
+    const x = a !== null && b !== null ? a : norm(left);
+    const y = a !== null && b !== null ? b : norm(right);
+    switch (operator) {
+      case "=": return x === y;
+      case "<>": return x !== y;
+      case "<": return x < y;
+      case ">": return x > y;
+      case "<=": return x <= y;
+      case ">=": return x >= y;
+      default: return null;
+    }
+  }
+
+  function formattingMatches(rule, ws, row, column, anchor) {
+    const operand = text => formattingOperand(String(text ?? ""), ws, row, column, anchor);
+    if (rule.type === "expression") {
+      const formula = String(rule.formulae?.[0] ?? "").trim().replace(/^=/, "");
+      const comparison = formula.match(/^(.+?)(<=|>=|<>|=|<|>)(.+)$/);
+      if (comparison) return formattingComparison(operand(comparison[1]), comparison[2], operand(comparison[3]));
+      const constant = operand(formula);
+      return typeof constant === "boolean" ? constant : typeof constant === "number" ? constant !== 0 : null;
+    }
+    if (rule.type === "cellIs") {
+      const operator = { equal: "=", notEqual: "<>", lessThan: "<", greaterThan: ">",
+        lessThanOrEqual: "<=", greaterThanOrEqual: ">=" }[rule.operator];
+      return formattingComparison(value(ws.getCell(row, column)) ?? "", operator, operand(rule.formulae?.[0]));
+    }
+    if (["containsBlanks", "notContainsBlanks"].includes(rule.type)) {
+      const blank = !String(value(ws.getCell(row, column)) ?? "").trim();
+      return rule.type === "containsBlanks" ? blank : !blank;
+    }
+    return null;
+  }
+
+  function grayRowReader(ws, layout) {
+    const column = layout.cols.fio;
+    const rules = (ws.conditionalFormattings || []).flatMap(format => {
+      const ranges = String(format.ref || "").split(/\s+/).map(formattingRange).filter(Boolean);
+      return (format.rules || []).filter(rule => rule.style?.fill || rule.stopIfTrue)
+        .map(rule => ({ rule, ranges, anchor: ranges[0] }));
+    }).sort((a, b) => (a.rule.priority ?? Infinity) - (b.rule.priority ?? Infinity));
+    return row => {
+      const baseFill = ws.getCell(row, column).fill;
+      const matching = rules.filter(({ ranges }) => ranges.some(range =>
+        row >= range.top && row <= range.bottom && column >= range.left && column <= range.right));
+      if (!isGrayFill(baseFill, ws.workbook) && !matching.some(({ rule }) => isGrayFill(rule.style?.fill, ws.workbook))) return false;
+      for (const { rule, anchor } of matching) {
+        const applies = formattingMatches(rule, ws, row, column, anchor);
+        if (applies === null) {
+          throw new Error(`Не вдалося визначити сіре позначення в рядку ${row}. Перерахуйте та збережіть Excel. Якщо правило форматування не підтримується, використайте копію зі звичайною заливкою рядків замість умовного форматування.`);
+        }
+        if (!applies) continue;
+        if (rule.style?.fill) return isGrayFill(rule.style.fill, ws.workbook);
+        if (rule.stopIfTrue) break;
+      }
+      return isGrayFill(baseFill, ws.workbook);
+    };
+  }
+
   function readRows(ws, layout) {
     const rows = [];
+    const isGrayRow = grayRowReader(ws, layout);
     ws.eachRow({ includeEmpty: false }, row => {
       if (row.number <= layout.row) return;
       const fio = String(value(row.getCell(layout.cols.fio)) || "").trim();
       if (!fio) return;
-      const item = { sourceRow: row.number, fio, issues: [] };
+      const item = { sourceRow: row.number, fio, issues: [], excludedFromRating: isGrayRow(row.number) };
       for (const def of layout.columns.slice(1)) {
         // Knowledge level comes from another source and is out of scope here.
         // Keep both columns, but never import old RZ values or their cached contribution.
@@ -124,14 +260,15 @@ window.RatingCore = (() => {
       item.pointsPerHour = item.ratingHours > 0 && item.earnedPoints !== null
         ? (item.earnedPoints + (item.reviews ?? 0)) / item.ratingHours : null;
     }
-    const reference = rows.filter(item => item.sourceRow >= base.first && item.sourceRow <= base.last);
+    const participants = rows.filter(item => !item.excludedFromRating);
+    const reference = participants.filter(item => item.sourceRow >= base.first && item.sourceRow <= base.last);
     if (!base.constant && reference.some(item => item.pointsPerHour === null)) {
       throw new Error("У базовій групі ефективності є порожні бали або непозитивні години. Перевірте вихідний рейтинг.");
     }
-    const maximum = base.constant ?? Math.max(0, ...reference.map(item => item.pointsPerHour));
-    if (!(maximum > 0)) throw new Error("База ефективності дорівнює нулю: перевірте бали й години рейтингу.");
+    const maximum = participants.length ? base.constant ?? Math.max(0, ...reference.map(item => item.pointsPerHour)) : null;
+    if (participants.length && !(maximum > 0)) throw new Error("Немає додатної бази ефективності серед учасників вихідної групи MAX. Перевірте бали, години та сірі позначення рейтингу.");
     for (const item of rows) {
-      item.efficiency = item.pointsPerHour === null ? null : item.pointsPerHour / maximum * 100;
+      item.efficiency = item.pointsPerHour === null || maximum === null ? null : item.pointsPerHour / maximum * 100;
       item.pointsPart = item.efficiency === null ? null : item.efficiency * 0.4;
       item.rz = 0;
       item.rzPart = 0;
@@ -141,7 +278,8 @@ window.RatingCore = (() => {
       item.finalScore = item.pointsPart === null ? null : item.qualityPart + item.rzPart + item.pointsPart;
       if (item.pointsPerHour === null) item.issues.push("Перевірте бали / години; місце не визначено");
       if (item.qualityScore === null) item.issues.push("НЕМАЄ КЯ (внесок 0)");
-      item.status = item.issues.join("; ") || "Знайдено";
+      item.status = [item.excludedFromRating ? "Не рейтингується — сірий рядок у вихідному файлі" : "", ...item.issues]
+        .filter(Boolean).join("; ") || "Знайдено";
     }
     return maximum;
   }
