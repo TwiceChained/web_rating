@@ -40,6 +40,7 @@ const dom = {
   sheetRow: document.getElementById("sheetRow"),
   sheetSelect: document.getElementById("sheetSelect"),
   calculateButton: document.getElementById("calculateButton"),
+  readiness: document.getElementById("readiness"),
   progress: document.getElementById("progress"),
   results: document.getElementById("results"),
   totalCount: document.getElementById("totalCount"),
@@ -56,6 +57,8 @@ const dom = {
 
 const state = {
   busy: false,
+  ratingLoading: false,
+  reviewsLoading: false,
   ratingVersion: 0,
   reviewsVersion: 0,
   reviewsFile: null,
@@ -231,11 +234,16 @@ function readRating(workbook, sheetName, scores) {
     item.qualityScore = matched?.score ?? null;
     item.qualityFio = matched?.fio || null;
   }
-  const inferredPeriod = RatingCore.inferPeriod(worksheet);
-  if (state.reviewsData && inferredPeriod && inferredPeriod !== dom.reviewPeriod.value) {
-    throw new Error(`Місяць переглядів не збігається з листом рейтингу (${inferredPeriod}). Оберіть відповідний лист або місяць.`);
+  state.report = null;
+  // No third file: no period validation, no review parser and no review replacement.
+  if (state.reviewsFile) {
+    if (!state.reviewsData) throw new Error("Перегляди ще не прочитано. Дочекайтеся завантаження або натисніть «Прибрати перегляди».");
+    const inferredPeriod = RatingCore.inferPeriod(worksheet);
+    if (inferredPeriod && inferredPeriod !== dom.reviewPeriod.value) {
+      throw new Error(`Місяць переглядів не збігається з листом рейтингу (${inferredPeriod}). Оберіть відповідний лист або місяць.`);
+    }
+    state.report = RatingCore.applyReviews(results, state.reviewsData, dom.reviewPeriod.value, state.reviewOverrides);
   }
-  state.report = state.reviewsData ? RatingCore.applyReviews(results, state.reviewsData, dom.reviewPeriod.value, state.reviewOverrides) : null;
   const base = RatingCore.normalization(worksheet, layout);
   state.maximum = RatingCore.recalculate(results, base);
   state.baseLabel = base.label;
@@ -318,9 +326,29 @@ function renderResults(sheetName) {
   (state.report?.unmatched ? dom.reviewMapping : dom.results).scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function calculationBlockReason() {
+  if (state.busy) return "Триває обробка…";
+  if (state.ratingLoading) return "Читаю великий файл рейтингу. Дочекайтеся позначки «Готово» — третій файл для запуску не потрібен.";
+  if (!state.qualityFile || !state.ratingFile) return "Для запуску потрібні лише statistics.xlsx та rating.xlsx. Перегляди — необов’язкові.";
+  if (!state.ratingWorkbook) return "Не вдалося прочитати рейтинг. Перевірте повідомлення про помилку нижче та оберіть файл повторно.";
+  if (!dom.sheetSelect.value) return "Оберіть лист фінального рейтингу.";
+  if (!state.reviewsFile) return "";
+  if (state.reviewsLoading) return "Читаю доданий файл переглядів…";
+  if (!state.reviewsData) return "Доданий файл переглядів не прочитано. Оберіть правильний файл або натисніть «Прибрати перегляди» для запуску з двома файлами.";
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(dom.reviewPeriod.value)) return "Для доданого файлу переглядів оберіть місяць і рік.";
+  return "";
+}
+
 function updateReadyState() {
-  dom.calculateButton.disabled = state.busy || !(state.qualityFile && state.ratingWorkbook && dom.sheetSelect.value)
-    || Boolean(state.reviewsFile && (!state.reviewsData || !dom.reviewPeriod.value));
+  const reason = calculationBlockReason();
+  dom.calculateButton.disabled = Boolean(reason);
+  dom.reviewPeriod.disabled = state.busy || !state.reviewsFile;
+  dom.reviewPeriod.required = false;
+  dom.calculateButton.querySelector("span").textContent = state.busy ? "Обробляю…"
+    : state.ratingLoading ? "Читаю файл рейтингу…" : "Розрахувати фінальний рейтинг";
+  dom.readiness.textContent = reason || (state.reviewsFile
+    ? "Готово до розрахунку з файлом переглядів. РЗ не враховується."
+    : "Готово до розрахунку з двома файлами. Третій файл не потрібен. РЗ не враховується.");
 }
 
 function displayValue(value, column) {
@@ -495,7 +523,9 @@ async function downloadFinalExcel() {
     legend.addRow(["Джерело", state.sourceSheet]);
     legend.addRow(["Перегляди", state.report ? state.report.period : "Збережено з рейтингу"]);
     legend.addRow(["База ефективності", `${state.baseLabel} вихідного листа; максимум ${state.maximum}`]);
-    legend.addRow(["Формула", "(Бали + перегляди) / (години − поза рейтингом) / база × 40 + РЗ × 0,2 + КЯ × 0,4"]);
+    legend.addRow(["Формула фіналу", "КК в рейтингу + РЗ в рейтингу + рейтингу (M + K + I)"]);
+    legend.addRow(["РЗ", "РЗ = 0; РЗ в рейтингу = 0. Дані з іншого джерела не імпортуються"]);
+    legend.addRow(["Внески", "КК × 0,4 + 0 + ефективність × 0,4. Вага РЗ не перерозподіляється"]);
     legend.addRow(["КК / КЯ", "У колонку КК підставлено середню оцінку КЯ зі statistics.xlsx"]);
     legend.addRow(["Однакові бали", "Однакове місце й зона; через округлення та нічиї частки зон приблизні"]);
     legend.addRow(["Немає КЯ", "Попередній результат: відсутній внесок КЯ дорівнює 0"]);
@@ -561,9 +591,11 @@ dom.ratingFile.addEventListener("change", async event => {
   resetReviewMapping();
   const version = ++state.ratingVersion;
   state.ratingFile = event.target.files?.[0] || null;
+  state.ratingLoading = Boolean(state.ratingFile);
   state.ratingWorkbook = null;
   dom.sheetRow.hidden = true;
   setFileCard(dom.ratingCard, dom.ratingName, dom.ratingState, state.ratingFile);
+  dom.ratingCard.classList.remove("ready");
   updateReadyState();
   if (!state.ratingFile) return;
 
@@ -591,6 +623,7 @@ dom.ratingFile.addEventListener("change", async event => {
     syncPeriod();
     dom.sheetRow.hidden = false;
     dom.ratingState.textContent = "Готово ✓";
+    dom.ratingCard.classList.add("ready");
     setProgress(`Знайдено фінальних листів: ${finalSheets.length}`);
   } catch (error) {
     if (version !== state.ratingVersion) return;
@@ -599,7 +632,10 @@ dom.ratingFile.addEventListener("change", async event => {
     dom.ratingState.textContent = "Помилка";
     setProgress(error.message || String(error), true);
   }
-  updateReadyState();
+  if (version === state.ratingVersion) {
+    state.ratingLoading = false;
+    updateReadyState();
+  }
 });
 
 dom.sheetSelect.addEventListener("change", () => {
@@ -616,10 +652,12 @@ dom.reviewsFile.addEventListener("change", async event => {
   resetReviewMapping();
   const version = ++state.reviewsVersion;
   state.reviewsFile = event.target.files?.[0] || null;
+  state.reviewsLoading = Boolean(state.reviewsFile);
   state.reviewsData = null;
   dom.reviewOptions.hidden = !state.reviewsFile;
   dom.removeReviews.hidden = !state.reviewsFile;
   setFileCard(dom.reviewsCard, dom.reviewsName, dom.reviewsState, state.reviewsFile);
+  dom.reviewsCard.classList.remove("ready");
   updateReadyState();
   if (!state.reviewsFile) return;
   try {
@@ -629,6 +667,7 @@ dom.reviewsFile.addEventListener("change", async event => {
     if (version !== state.reviewsVersion) return;
     state.reviewsData = RatingCore.readReviews(workbook);
     dom.reviewsState.textContent = "Готово ✓";
+    dom.reviewsCard.classList.add("ready");
     setProgress(`Перегляди прочитано. Перевірте місяць і натисніть «Розрахувати».`);
   } catch (error) {
     if (version !== state.reviewsVersion) return;
@@ -636,7 +675,10 @@ dom.reviewsFile.addEventListener("change", async event => {
     dom.reviewsState.textContent = "Помилка";
     setProgress(error.message || String(error), true);
   }
-  updateReadyState();
+  if (version === state.reviewsVersion) {
+    state.reviewsLoading = false;
+    updateReadyState();
+  }
 });
 
 dom.removeReviews.addEventListener("click", () => {
@@ -644,6 +686,7 @@ dom.removeReviews.addEventListener("click", () => {
   state.reviewsVersion++;
   state.reviewsFile = null;
   state.reviewsData = null;
+  state.reviewsLoading = false;
   dom.reviewsFile.value = "";
   dom.reviewOptions.hidden = true;
   dom.removeReviews.hidden = true;
@@ -653,8 +696,8 @@ dom.removeReviews.addEventListener("click", () => {
 });
 
 dom.calculateButton.addEventListener("click", async () => {
-  if (!state.qualityFile || !state.ratingWorkbook || !dom.sheetSelect.value) return;
-  if (dom.calculateButton.disabled) return;
+  const reason = calculationBlockReason();
+  if (reason) { updateReadyState(); setProgress(reason, true); return; }
   setBusy(true);
   dom.results.hidden = true;
 
@@ -677,3 +720,4 @@ dom.calculateButton.addEventListener("click", async () => {
 
 dom.downloadExcel.addEventListener("click", downloadFinalExcel);
 dom.downloadScores.addEventListener("click", downloadScoresTxt);
+updateReadyState();

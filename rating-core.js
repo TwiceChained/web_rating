@@ -88,6 +88,9 @@ window.RatingCore = (() => {
       if (!fio) return;
       const item = { sourceRow: row.number, fio, issues: [] };
       for (const def of layout.columns.slice(1)) {
+        // Knowledge level comes from another source and is out of scope here.
+        // Keep both columns, but never import old RZ values or their cached contribution.
+        if (def.key === "rz" || def.key === "rzPart") { item[def.key] = 0; continue; }
         const raw = value(row.getCell(layout.cols[def.key]));
         item[def.key] = def.key.startsWith("extra") ? raw : number(raw);
       }
@@ -130,9 +133,12 @@ window.RatingCore = (() => {
     for (const item of rows) {
       item.efficiency = item.pointsPerHour === null ? null : item.pointsPerHour / maximum * 100;
       item.pointsPart = item.efficiency === null ? null : item.efficiency * 0.4;
-      item.rzPart = (item.rz ?? 0) * 0.2;
+      item.rz = 0;
+      item.rzPart = 0;
       item.qualityPart = (item.qualityScore ?? 0) * 0.4;
-      item.finalScore = item.pointsPart === null ? null : item.pointsPart + item.rzPart + item.qualityPart;
+      // Final = "КК в рейтингу" + "РЗ в рейтингу" + "рейтингу" (M + K + I).
+      // The missing 20% RZ contribution is NOT redistributed to the other components.
+      item.finalScore = item.pointsPart === null ? null : item.qualityPart + item.rzPart + item.pointsPart;
       if (item.pointsPerHour === null) item.issues.push("Перевірте бали / години; місце не визначено");
       if (item.qualityScore === null) item.issues.push("НЕМАЄ КЯ (внесок 0)");
       item.status = item.issues.join("; ") || "Знайдено";
